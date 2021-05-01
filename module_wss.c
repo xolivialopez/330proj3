@@ -4,21 +4,22 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/moduleparam.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 
-void addressSpace();
+void addressSpace(void);
+int pages(struct mm_struct* mm, unsigned long int address);
+
 unsigned long int pid;
 module_param(pid,long,S_IRUSR);
 
-int pages(mm_struct* mm, unsigned long int address){
+int pages(struct mm_struct* mm, unsigned long int address){
     int pageReturn;
     pgd_t *pgd;
     p4d_t *p4d;
     pmd_t *pmd;
     pud_t *pud;
     pte_t *ptep, pte;
-
-    struct page *page = NULL;
-    struct mm_struct *mm = current->mm;
 
     pgd = pgd_offset(mm, address);                    // get pgd from mm and the page address
     if (pgd_none(*pgd) || pgd_bad(*pgd)){           // check if pgd is bad or does not exist
@@ -53,35 +54,77 @@ int pages(mm_struct* mm, unsigned long int address){
 void addressSpace(){
     struct task_struct *task_list;
     int wss = 0;
-    int current;
+    int curr;
+    int final;
+    unsigned long int areaAddr;
+    struct vm_area_struct* area;
+    struct mm_struct* mm;
+    
     for_each_process(task_list){
         if(task_list->pid == pid){
-            struct vm_area_struct* area = task_list->mm->mmap;
+            mm = task_list->mm;
+            area = task_list->mm->mmap;
             while(area != NULL){
-                unsigned long int areaAddr = area->vm_start;
+            	areaAddr = area->vm_start;
                 while(areaAddr < area->vm_end){
-                    struct mm_struct* mm = task_list->mm;
-                    current = pages(mm, areaAddr);
-                    if(current != 0){
+                    curr = pages(mm, areaAddr);
+                    if(curr != 0){
                         wss += PAGE_SIZE;
                     }
                     areaAddr += PAGE_SIZE;
                 }
                 area = area->vm_next;
             }
-            printk(KERN_INFO "[%ld]\t: [%d kB]", pid, wss);
+            final = wss/1024;
+            printk(KERN_INFO "[%ld]\t: [%d kB]", pid, final);
             wss = 0;
         }
     }
 }
 
+// Set interval to 1 second
+unsigned long timer_interval_ns = 5e9;
+static struct hrtimer hr_timer;
+
+// Callback executed periodically, reset timer
+enum hrtimer_restart timer_callback( struct hrtimer *timer_for_restart )
+{
+    ktime_t currtime , interval;
+    currtime  = ktime_get();
+    interval = ktime_set(0,timer_interval_ns);
+    hrtimer_forward(timer_for_restart, currtime , interval);
+    addressSpace();
+    return HRTIMER_RESTART;
+}
+
+// Initialize timer with callback
+static int timer_init(void) {
+    ktime_t ktime;
+    ktime = ktime_set( 0, timer_interval_ns );
+    hrtimer_init( &hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL );
+    hr_timer.function = &timer_callback;
+    hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );  // Start timer
+    return 0;
+}
+
+// Remove timer
+static void timer_exit(void) {
+    int ret;
+    ret = hrtimer_cancel( &hr_timer );
+    if (ret) printk("Timer was still in use!\n");
+    printk("HR Timer removed\n");
+}
+MODULE_LICENSE("GPL");
+
 int init_module(){
     printk(KERN_INFO "[PID]\t: [WSS]");
     addressSpace();
+    timer_init();
     return 0;
 }
 
 void cleanup_module(){
     printk(KERN_INFO "");
+    timer_exit();
     return;
 }
